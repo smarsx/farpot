@@ -26,6 +26,7 @@ contract Farpot is Ownable, VRFV2PlusWrapperConsumerBase {
         string description;
         string longDescription;
         address[] tickets;
+        address[] referrals;
     }
 
     error InvalidFee();
@@ -48,7 +49,6 @@ contract Farpot is Ownable, VRFV2PlusWrapperConsumerBase {
         uint256 winnerShare,
         uint256 referralShare,
         address beneficiary,
-        address creator,
         string title
     );
     event NewTicket(uint256 indexed potID, uint256 numTickets, address user, address referral);
@@ -66,10 +66,10 @@ contract Farpot is Ownable, VRFV2PlusWrapperConsumerBase {
 
     ERC20 public immutable usdc;
     address public vault;
+    uint256 nextID;
 
     mapping(uint256 potID => Pot) public pots;
     mapping(uint256 => uint256) public vrfRequests;
-    mapping(uint256 potID => mapping(address user => address referredBy)) public referrals;
 
     constructor(address _usdc, address _vault) VRFV2PlusWrapperConsumerBase(0xb0407dbe851f8318bd31404A49e658143C982F23) {
         _initializeOwner(msg.sender);
@@ -87,14 +87,13 @@ contract Farpot is Ownable, VRFV2PlusWrapperConsumerBase {
         string calldata _title,
         string calldata _description,
         string calldata _longDescription
-    ) external {
-        uint256 id = uint256(keccak256(abi.encodePacked(msg.sender, _title)));
+    ) external returns (uint256 id) {
+        id = nextID++;
 
         if (_beneficiary == address(0)) revert InvalidParams();
         if (_deadline <= block.timestamp) revert InvalidParams();
         if (_beneficiaryShare + _winnerShare + _referralShare + FEE_NUMERATOR != FEE_DENOMINATOR) revert InvalidParams();
         if (_beneficiaryShare < MINIMUM_NUMERATOR || _winnerShare < MINIMUM_NUMERATOR || _referralShare < MINIMUM_NUMERATOR) revert InvalidParams();
-        if (pots[id].creator != address(0)) revert ExistingPot();
 
         address[] memory tickets;
 
@@ -112,10 +111,11 @@ contract Farpot is Ownable, VRFV2PlusWrapperConsumerBase {
             title: _title,
             description: _description,
             longDescription: _longDescription,
-            tickets: tickets
+            tickets: tickets,
+            referrals: tickets
         });
 
-        emit CreatedPot(id, _deadline, _beneficiaryShare, _winnerShare, _referralShare, _beneficiary, msg.sender, _title);
+        emit CreatedPot(id, _deadline, _beneficiaryShare, _winnerShare, _referralShare, _beneficiary, _title);
     }
 
     function enter(uint256 _potID, uint256 _numTickets, address _referral) external {
@@ -124,7 +124,7 @@ contract Farpot is Ownable, VRFV2PlusWrapperConsumerBase {
         if (_numTickets == 0) revert InvalidParams();
 
         if (_referral != address(0) && _referral != msg.sender) {
-            referrals[_potID][msg.sender] = _referral;
+            pots[_potID].referrals.push(_referral);
         }
 
         for (uint256 i; i < _numTickets; i++) {
@@ -161,7 +161,11 @@ contract Farpot is Ownable, VRFV2PlusWrapperConsumerBase {
 
         uint256 pot = pots[_potID].tickets.length * TICKET_PRICE;
         address winner = pots[_potID].tickets[pots[_potID].seed % pots[_potID].tickets.length];
-        address referral = referrals[_potID][winner];
+
+        // if len(referrals) > 0: pick random referral else beneficiary gets referral pot
+        address referral = pots[_potID].referrals.length > 0
+            ? pots[_potID].referrals[pots[_potID].seed % pots[_potID].referrals.length]
+            : pots[_potID].beneficiary;
 
         uint256 beneficiaryPot = FixedPointMathLib.mulDiv(pot, pots[_potID].beneficiaryShare, FEE_DENOMINATOR);
         uint256 winnerPot = FixedPointMathLib.mulDiv(pot, pots[_potID].winnerShare, FEE_DENOMINATOR);
@@ -170,13 +174,8 @@ contract Farpot is Ownable, VRFV2PlusWrapperConsumerBase {
 
         usdc.transfer(pots[_potID].beneficiary, beneficiaryPot);
         usdc.transfer(winner, winnerPot);
+        usdc.transfer(referral, referralPot);
         usdc.transfer(vault, feePot);
-
-        if (referral != address(0)) {
-            usdc.transfer(referral, referralPot);
-        } else {
-            usdc.transfer(pots[_potID].beneficiary, referralPot);
-        }
 
         emit Resolved(_potID, pot, winner, referral);
     }
