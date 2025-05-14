@@ -63,10 +63,11 @@ contract Farpot is Ownable, VRFV2PlusWrapperConsumerBase {
     uint256 public constant FEE_DENOMINATOR = 10000;
     uint256 public constant MINIMUM_NUMERATOR = 100;
     uint256 public constant EMERGENCY_RECOVERY_PERIOD = 100 days;
+    uint256 public constant MAX_TIMEFRAME = 18 days;
 
     ERC20 public immutable usdc;
     address public vault;
-    uint256 nextID;
+    uint256 public nextID;
 
     mapping(uint256 potID => Pot) public pots;
     mapping(uint256 => uint256) public vrfRequests;
@@ -91,7 +92,7 @@ contract Farpot is Ownable, VRFV2PlusWrapperConsumerBase {
         id = nextID++;
 
         if (_beneficiary == address(0)) revert InvalidParams();
-        if (_deadline <= block.timestamp) revert InvalidParams();
+        if (_deadline <= block.timestamp || _deadline > block.timestamp + MAX_TIMEFRAME) revert InvalidParams();
         if (_beneficiaryShare + _winnerShare + _referralShare + FEE_NUMERATOR != FEE_DENOMINATOR) revert InvalidParams();
         if (_beneficiaryShare < MINIMUM_NUMERATOR || _winnerShare < MINIMUM_NUMERATOR || _referralShare < MINIMUM_NUMERATOR) revert InvalidParams();
 
@@ -179,6 +180,22 @@ contract Farpot is Ownable, VRFV2PlusWrapperConsumerBase {
 
         emit Resolved(_potID, pot, winner, referral);
     }
+
+    /*//////////////////////////////////////////////////////////////
+                                PUBLIC
+    //////////////////////////////////////////////////////////////*/
+
+    function getTickets(uint256 _potID) public view returns (address[] memory tickets) {
+        tickets = pots[_potID].tickets;
+    }
+
+    function getReferrals(uint256 _potID) public view returns (address[] memory referrals) {
+        referrals = pots[_potID].referrals;
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                                ADMIN
+    //////////////////////////////////////////////////////////////*/
 
     function emergencyRecovery(uint256 _potID, address _to) external onlyOwner {
         if (!pots[_potID].resolved && block.timestamp > pots[_potID].deadline + EMERGENCY_RECOVERY_PERIOD && pots[_potID].tickets.length > 0) {
