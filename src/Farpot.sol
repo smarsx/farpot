@@ -6,7 +6,7 @@ import {ERC20} from "solady/tokens/ERC20.sol";
 import {FixedPointMathLib} from "solady/utils/FixedPointMathLib.sol";
 import {VRFV2PlusWrapperConsumerBase} from "./utils/vrf/VRFV2PlusWrapperConsumerBase.sol";
 
-/// @title Farpot: a configurable‑share fundraising raffle.
+/// @title Farpot: a configurable fundraising raffle.
 /// @dev Modeled on classic 50-50 raffles, Farpot adds an optional referral slice and lets creators configure any pot split they want.
 /// @author @smarsx
 /// @notice experimental unaudited test-in-prod software.
@@ -14,14 +14,14 @@ contract Farpot is Ownable, VRFV2PlusWrapperConsumerBase {
     struct Pot {
         bool resolved;
         bool seeded;
-        uint16 winnerShare;
-        uint16 beneficiaryShare;
+        uint16 fundraiserShare;
+        uint16 raffleShare;
         uint16 referralShare;
         uint40 deadline;
         uint152 goal;
         uint256 seed;
         address creator;
-        address beneficiary;
+        address fundraiser;
         string title;
         string description;
         string longDescription;
@@ -45,8 +45,8 @@ contract Farpot is Ownable, VRFV2PlusWrapperConsumerBase {
     event CreatedPot(
         uint256 indexed id,
         uint256 deadline,
-        uint256 beneficiaryShare,
-        uint256 winnerShare,
+        uint256 fundraiserShare,
+        uint256 raffleShare,
         uint256 referralShare,
         address beneficiary,
         string title
@@ -63,7 +63,7 @@ contract Farpot is Ownable, VRFV2PlusWrapperConsumerBase {
     uint256 public constant FEE_DENOMINATOR = 10000;
     uint256 public constant MINIMUM_NUMERATOR = 100;
     uint256 public constant EMERGENCY_RECOVERY_PERIOD = 100 days;
-    uint256 public constant MAX_TIMEFRAME = 18 days;
+    uint256 public constant MAX_TIMEFRAME = 30 days;
 
     ERC20 public immutable usdc;
     address public vault;
@@ -80,35 +80,35 @@ contract Farpot is Ownable, VRFV2PlusWrapperConsumerBase {
 
     function create(
         uint256 _goal,
-        uint256 _beneficiaryShare,
-        uint256 _winnerShare,
+        uint256 _fundraiserShare,
+        uint256 _raffleShare,
         uint256 _referralShare,
         uint256 _deadline,
-        address _beneficiary,
+        address _fundraiser,
         string calldata _title,
         string calldata _description,
         string calldata _longDescription
     ) external returns (uint256 id) {
         id = nextID++;
 
-        if (_beneficiary == address(0)) revert InvalidParams();
+        if (_fundraiser == address(0)) revert InvalidParams();
         if (_deadline <= block.timestamp || _deadline > block.timestamp + MAX_TIMEFRAME) revert InvalidParams();
-        if (_beneficiaryShare + _winnerShare + _referralShare + FEE_NUMERATOR != FEE_DENOMINATOR) revert InvalidParams();
-        if (_beneficiaryShare < MINIMUM_NUMERATOR || _winnerShare < MINIMUM_NUMERATOR || _referralShare < MINIMUM_NUMERATOR) revert InvalidParams();
+        if (_fundraiserShare + _raffleShare + _referralShare + FEE_NUMERATOR != FEE_DENOMINATOR) revert InvalidParams();
+        if (_fundraiserShare < MINIMUM_NUMERATOR || _raffleShare < MINIMUM_NUMERATOR || _referralShare < MINIMUM_NUMERATOR) revert InvalidParams();
 
         address[] memory tickets;
 
         pots[id] = Pot({
             resolved: false,
             seeded: false,
-            beneficiaryShare: uint16(_beneficiaryShare),
-            winnerShare: uint16(_winnerShare),
+            fundraiserShare: uint16(_fundraiserShare),
+            raffleShare: uint16(_raffleShare),
             referralShare: uint16(_referralShare),
             deadline: uint40(_deadline),
             goal: uint152(_goal),
             seed: 0,
             creator: msg.sender,
-            beneficiary: _beneficiary,
+            fundraiser: _fundraiser,
             title: _title,
             description: _description,
             longDescription: _longDescription,
@@ -116,23 +116,31 @@ contract Farpot is Ownable, VRFV2PlusWrapperConsumerBase {
             referrals: tickets
         });
 
-        emit CreatedPot(id, _deadline, _beneficiaryShare, _winnerShare, _referralShare, _beneficiary, _title);
+        emit CreatedPot(id, _deadline, _fundraiserShare, _raffleShare, _referralShare, _fundraiser, _title);
     }
 
     function enter(uint256 _potID, uint256 _numTickets, address _referral) external {
+        _enter(_potID, _numTickets, _referral, msg.sender);
+    }
+
+    function enterFor(uint256 _potID, uint256 _numTickets, address _referral, address _purchaser) external {
+        _enter(_potID, _numTickets, _referral, _purchaser);
+    }
+
+    function _enter(uint256 _potID, uint256 _numTickets, address _referral, address _purchaser) internal {
         if (pots[_potID].deadline == 0) revert PotNotExist();
         if (block.timestamp >= pots[_potID].deadline) revert PotClosed();
         if (_numTickets == 0) revert InvalidParams();
 
-        if (_referral != address(0) && _referral != msg.sender) {
+        if (_referral != address(0) && _referral != _purchaser) {
             pots[_potID].referrals.push(_referral);
         }
 
         for (uint256 i; i < _numTickets; i++) {
-            pots[_potID].tickets.push(msg.sender);
+            pots[_potID].tickets.push(_purchaser);
         }
 
-        emit NewTicket(_potID, _numTickets, msg.sender, _referral);
+        emit NewTicket(_potID, _numTickets, _purchaser, _referral);
         usdc.transferFrom(msg.sender, address(this), _numTickets * TICKET_PRICE);
     }
 
@@ -166,15 +174,15 @@ contract Farpot is Ownable, VRFV2PlusWrapperConsumerBase {
         // if len(referrals) > 0: pick random referral else beneficiary gets referral pot
         address referral = pots[_potID].referrals.length > 0
             ? pots[_potID].referrals[pots[_potID].seed % pots[_potID].referrals.length]
-            : pots[_potID].beneficiary;
+            : pots[_potID].fundraiser;
 
-        uint256 beneficiaryPot = FixedPointMathLib.mulDiv(pot, pots[_potID].beneficiaryShare, FEE_DENOMINATOR);
-        uint256 winnerPot = FixedPointMathLib.mulDiv(pot, pots[_potID].winnerShare, FEE_DENOMINATOR);
+        uint256 fundraiserPot = FixedPointMathLib.mulDiv(pot, pots[_potID].fundraiserShare, FEE_DENOMINATOR);
+        uint256 rafflePot = FixedPointMathLib.mulDiv(pot, pots[_potID].raffleShare, FEE_DENOMINATOR);
         uint256 referralPot = FixedPointMathLib.mulDiv(pot, pots[_potID].referralShare, FEE_DENOMINATOR);
-        uint256 feePot = pot - (beneficiaryPot + winnerPot + referralPot); // clean-up rounding
+        uint256 feePot = pot - (fundraiserPot + rafflePot + referralPot); // clean-up rounding
 
-        usdc.transfer(pots[_potID].beneficiary, beneficiaryPot);
-        usdc.transfer(winner, winnerPot);
+        usdc.transfer(pots[_potID].fundraiser, fundraiserPot);
+        usdc.transfer(winner, rafflePot);
         usdc.transfer(referral, referralPot);
         usdc.transfer(vault, feePot);
 
